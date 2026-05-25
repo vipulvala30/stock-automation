@@ -17,8 +17,10 @@ sheet = client.open("NSE500 Tracker").sheet1
 
 
 # ✅ TELEGRAM (REPLACE TOKEN AFTER TESTING)
-BOT_TOKEN = "8595041350:AAHNzPFfWgIlQ-EvWM2kWh-GJ5md4D8dKyw"
-CHAT_ID = "637317120"
+import os
+
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+CHAT_ID = os.getenv("CHAT_ID")
 
 
 # ✅ NSE 500 LIST
