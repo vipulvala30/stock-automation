@@ -21,6 +21,10 @@ jobs:
       - name: Install libraries
         run: |
           pip install pandas yfinance gspread oauth2client requests scikit-learn
-
-      - name: Run script
-        run: python test.py
+          
+    - name: Run script
+      env:
+        GOOGLE_CREDS: ${{ secrets.GOOGLE_CREDS }}
+        BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+        CHAT_ID: ${{ secrets.CHAT_ID }}
+    run: python test.py
