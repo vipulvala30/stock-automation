@@ -11,7 +11,11 @@ from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
 scope = ["https://spreadsheets.google.com/feeds",
          "https://www.googleapis.com/auth/drive"]
 
-creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
+import json
+import os
+
+creds_dict = json.loads(os.getenv("GOOGLE_CREDS"))
+creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
 client = gspread.authorize(creds)
 sheet = client.open("NSE500 Tracker").sheet1
 
@@ -19,8 +23,11 @@ sheet = client.open("NSE500 Tracker").sheet1
 # ✅ TELEGRAM (REPLACE TOKEN AFTER TESTING)
 import os
 
+import os
+
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
+
 
 
 # ✅ NSE 500 LIST
