@@ -2,52 +2,39 @@ import pandas as pd
 import yfinance as yf
 import gspread
 import requests
+import json
+import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from oauth2client.service_account import ServiceAccountCredentials
-from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
+from sklearn.ensemble import RandomForestRegressor
 
 
-# ✅ GOOGLE SHEETS CONNECTION
-scope = ["https://spreadsheets.google.com/feeds",
-         "https://www.googleapis.com/auth/drive"]
+# ================== GOOGLE SHEETS ==================
 
 import json
 import os
 
-creds_dict = json.loads(os.getenv("GOOGLE_CREDS"))
-creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+scope = ["https://spreadsheets.google.com/feeds",
+         "https://www.googleapis.com/auth/drive"]
+
+# ✅ Use GitHub secrets if available
+if os.getenv("GOOGLE_CREDS"):
+    creds_dict = json.loads(os.getenv("GOOGLE_CREDS"))
+    creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+
+# ✅ Otherwise use local file
+else:
+    creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
+
 client = gspread.authorize(creds)
 sheet = client.open("NSE500 Tracker").sheet1
 
 
-# ✅ TELEGRAM (REPLACE TOKEN AFTER TESTING)
-import os
 
-import os
+# ================== TELEGRAM ==================
+BOT_TOKEN = os.getenv("8595041350:AAHNzPFfWgIlQ-EvWM2kWh-GJ5md4D8dKyw")
+CHAT_ID = os.getenv("637317120")
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-CHAT_ID = os.getenv("CHAT_ID")
-
-
-
-# ✅ NSE 500 LIST
-def get_nse_500():
-    df = pd.read_csv("https://archives.nseindia.com/content/equities/EQUITY_L.csv")
-    symbols = df["SYMBOL"].tolist()
-    symbols = [s for s in symbols if "DUMMY" not in s]
-    return [s + ".NS" for s in symbols[:300]]
-
-
-# ✅ RSI
-def calculate_rsi(series, period=14):
-    delta = series.diff()
-    gain = delta.clip(lower=0).rolling(period).mean()
-    loss = -delta.clip(upper=0).rolling(period).mean()
-    rs = gain / loss
-    return (100 - (100 / (1 + rs))).iloc[-1]
-
-
-# ✅ TELEGRAM
 def send_telegram(msg):
     try:
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
@@ -56,8 +43,24 @@ def send_telegram(msg):
         pass
 
 
-# ✅ FETCH DATA
-def fetch_stock(stock):
+# ================== STOCK LIST ==================
+def get_nse():
+    df = pd.read_csv("https://archives.nseindia.com/content/equities/EQUITY_L.csv")
+    symbols = [s for s in df["SYMBOL"].tolist() if "DUMMY" not in s]
+    return [s + ".NS" for s in symbols[:200]]
+
+
+# ================== RSI ==================
+def calculate_rsi(series, period=14):
+    delta = series.diff()
+    gain = delta.clip(lower=0).rolling(period).mean()
+    loss = -delta.clip(upper=0).rolling(period).mean()
+    rs = gain / loss
+    return (100 - (100 / (1 + rs))).iloc[-1]
+
+
+# ================== FETCH DATA ==================
+def fetch(stock):
     try:
         t = yf.Ticker(stock)
         info = t.info
@@ -82,8 +85,7 @@ def fetch_stock(stock):
         hist_price = hist["Close"].mean()
         momentum = hist["Close"].iloc[-1] - hist["Close"].iloc[0]
         rsi = calculate_rsi(hist["Close"])
-
-        hist_pe = hist_price / eps if hist_price and eps else None
+        hist_pe = hist_price / eps if eps else None
 
         return {
             "Stock": stock,
@@ -106,166 +108,231 @@ def fetch_stock(stock):
         return None
 
 
-# ✅ MULTITHREAD FETCH
-stocks = get_nse_500()
+# ================== LOAD DATA ==================
+stocks = get_nse()
 data = []
 
 with ThreadPoolExecutor(max_workers=15) as ex:
-    futures = [ex.submit(fetch_stock, s) for s in stocks]
-
+    futures = [ex.submit(fetch, s) for s in stocks]
     for f in as_completed(futures):
-        r = f.result()
-        if r:
-            data.append(r)
-
+        result = f.result()
+        if result:
+            data.append(result)
 
 df = pd.DataFrame(data)
 
-# ✅ CLEAN DATA
+# ================== CLEAN ==================
 df = df.replace([float("inf"), -float("inf")], "")
 df = df.fillna("")
 
 
-# ✅ SECTOR ANALYSIS
-df["PE"] = pd.to_numeric(df["PE"], errors="coerce")
-sector_pe = df.groupby("Sector")["PE"].mean().to_dict()
-df["Sector PE"] = df["Sector"].map(sector_pe)
+# ================== ADV NORMALIZATION ==================
+def normalize_features(df, cols):
+    df = df.copy()
+
+    for col in cols:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+        # ✅ use median (robust)
+        df[col] = df[col].fillna(df[col].median())
+
+        min_v = df[col].min()
+        max_v = df[col].max()
+
+        if pd.isna(min_v) or pd.isna(max_v) or min_v == max_v:
+            df[col] = 0
+        else:
+            df[col] = (df[col] - min_v) / (max_v - min_v)
+
+        df[col] = df[col].clip(0, 1)
+
+    return df
 
 
-# ✅ ADVANCED SCORING
-def score(row):
-    s = 0
-    try:
-        pe = float(row["PE"])
-        fpe = float(row["Forward PE"])
-        eps = float(row["EPS"])
-        feps = float(row["Forward EPS"])
-        hist_pe = float(row["Historical PE"])
-        rsi = float(row["RSI"])
-        momentum = float(row["Momentum"])
-        price = float(row["Price"])
-        hist_price = float(row["Historical Price"])
-        mcap = float(row["MarketCap"])
-        roe = float(row["ROE"]) if row["ROE"] else 0
-        debt = float(row["Debt"]) if row["Debt"] else 0
-        sector_pe = float(row["Sector PE"])
-
-        # VALUE
-        if pe < hist_pe:
-            s += 10
-        if fpe < pe:
-            s += 10
-        if pe < sector_pe:
-            s += 5
-
-        # GROWTH
-        if feps > eps:
-            s += 10
-
-        # MOMENTUM
-        if 35 <= rsi <= 55:
-            s += 10
-        if momentum > 0:
-            s += 5
-
-        # QUALITY
-        if mcap > 1e11:
-            s += 10
-        if roe > 0.15:
-            s += 10
-        if debt < 1:
-            s += 5
-
-        # VALUE ENTRY
-        if price < hist_price:
-            s += 5
-
-    except:
-        pass
-
-    return s
-
-
-df["Score"] = df.apply(score, axis=1)
-
-
-# ✅ AI MODEL
+# ================== AI MODEL ==================
 def run_ai(df):
     try:
         df2 = df.replace("", None).dropna()
 
         features = [
-            "PE", "Forward PE", "EPS", "Forward EPS",
-            "RSI", "Momentum", "ROE", "Debt", "Historical PE"
+            "PE","Forward PE","EPS","Forward EPS",
+            "RSI","Momentum","ROE","Debt","Historical PE"
         ]
 
         df2[features] = df2[features].astype(float)
         df2["Price"] = df2["Price"].astype(float)
 
+        model = RandomForestRegressor(
+            n_estimators=200,
+            max_depth=10,
+            random_state=42
+        )
+
         X = df2[features]
         y = df2["Price"]
 
-        reg = RandomForestRegressor(n_estimators=50)
-        reg.fit(X, y)
+        model.fit(X, y)
 
-        # prediction safe
-        pred_input = df[features].replace("", 0)
-        pred_input = pred_input.fillna(0).astype(float)
+        pred_input = df[features].replace("", 0).fillna(0).astype(float)
 
-        df["Predicted Price"] = reg.predict(pred_input)
+        df["Predicted Price"] = model.predict(pred_input)
+        df["Expected Return"] = ((df["Predicted Price"] - df["Price"]) / df["Price"]) * 100
 
-        # classification
-        future = y.shift(-1)
-        df2["target"] = (future > y).astype(int)
-
-        clf = RandomForestClassifier(n_estimators=50)
-        clf.fit(X, df2["target"])
-
-        probs = clf.predict_proba(pred_input)[:,1]
-        df["Buy Probability"] = (probs * 100).round(2)
-
-    except Exception as e:
-        print("AI error:", e)
+    except:
         df["Predicted Price"] = ""
-        df["Buy Probability"] = ""
+        df["Expected Return"] = ""
 
     return df
 
 
+# ================== SCORING ==================
+def advanced_score(df):
+    cols = [
+        "PE","Forward PE","EPS","Forward EPS",
+        "RSI","Momentum","ROE","Debt","Historical PE"
+    ]
+
+    df = normalize_features(df, cols)
+
+    df["Score"] = (
+        (1 - df["PE"]) * 0.15 +
+        (1 - df["Forward PE"]) * 0.15 +
+        df["EPS"] * 0.10 +
+        df["Forward EPS"] * 0.10 +
+        df["ROE"] * 0.10 +
+        (1 - df["Debt"]) * 0.05 +
+        df["Momentum"] * 0.15 +
+        (1 - abs(df["RSI"] - 0.5)) * 0.10 +
+        (1 - df["Historical PE"]) * 0.10
+    )
+
+    df["Score"] = (df["Score"] * 100).round(2)
+    return df
+
+
+# ================== SECTOR ROTATION ==================
+def sector_rotation(df):
+    df["Momentum"] = pd.to_numeric(df["Momentum"], errors="coerce")
+
+    sector_strength = (
+        df.groupby("Sector")["Momentum"].mean() * 0.7 +
+        df.groupby("Sector")["ROE"].mean() * 0.3
+    ).reset_index()
+
+    sector_strength.columns = ["Sector", "Strength"]
+
+    top_sectors = sector_strength.sort_values(
+        by="Strength", ascending=False
+    ).head(3)["Sector"]
+
+    df["Top Sector"] = df["Sector"].isin(top_sectors)
+
+    print("🔥 Top Sectors:", list(top_sectors))
+    return df
+
+
+# ================== BACKTEST ==================
+def backtest(df):
+    try:
+        selected = df[df["Score"] > 60]
+
+        avg = selected["Expected Return"].mean()
+        win = (selected["Expected Return"] > 0).mean() * 100
+
+        print(f"✅ Avg Return: {round(avg,2)}%")
+        print(f"✅ Win Rate: {round(win,2)}%")
+
+    except:
+        pass
+
+    return df
+
+# ✅ PORTFOLIO ALLOCATION
+def portfolio_allocation(df, capital=100000):
+    try:
+        df = df.copy()
+
+        # ✅ Convert numeric safely
+        df["Score"] = pd.to_numeric(df["Score"], errors="coerce")
+        df["Expected Return"] = pd.to_numeric(df["Expected Return"], errors="coerce")
+        df["Price"] = pd.to_numeric(df["Price"], errors="coerce")
+
+        df = df.dropna()
+
+        # ✅ Combine strength score
+        df["Weight Score"] = df["Score"] * 0.6 + df["Expected Return"] * 0.4
+
+        # ✅ Normalize weights
+        total_weight = df["Weight Score"].sum()
+        df["Allocation %"] = (df["Weight Score"] / total_weight) * 100
+        
+        # ✅ RISK CONTROL (LIMIT MAX 20%)
+        df["Allocation %"] = df["Allocation %"].clip(upper=20)
+
+        # ✅ Allocate capital
+        df["Allocated Amount"] = (df["Allocation %"] / 100) * capital
+
+        # ✅ Number of shares
+        df["Shares"] = (df["Allocated Amount"] / df["Price"]).astype(int)
+
+        # ✅ Final invested amount
+        df["Invested"] = df["Shares"] * df["Price"]
+        
+       # ✅ Re-normalize weights
+        total = df["Allocation %"].sum()
+        df["Allocation %"] = (df["Allocation %"] / total) * 100
+
+
+        print("✅ Portfolio created with total capital:", capital)
+
+    except Exception as e:
+        print("Portfolio error:", e)
+
+    return df
+
+
+
+# ================== PIPELINE ==================
 df = run_ai(df)
+df = advanced_score(df)
+df = sector_rotation(df)
+df = backtest(df)
 
 
-# ✅ FINAL SORT
-df = df.sort_values(["Score", "Buy Probability"], ascending=False)
-
-
-# ✅ TOP 10 FILTER (SMART)
+# ================== TOP STOCKS ==================
 top10 = df[
-    (df["Score"] > 40) &
-    (df["Buy Probability"] > 60)
-].head(10)
+    (df["Score"] > 60) &
+    (df["Expected Return"] > 5) &
+    (df["Top Sector"] == True)
+].sort_values(
+    by=["Score","Expected Return"], ascending=False
+).head(10)
+
+# ✅ PORTFOLIO ALLOCATION
+portfolio = portfolio_allocation(top10, capital=100000)
 
 
-# ✅ FINAL CLEAN BEFORE UPLOAD
+# ================== FINAL CLEAN ==================
 df = df.replace([float("inf"), -float("inf")], "")
 df = df.fillna("")
 df = df.astype(str)
 
-
-# ✅ UPLOAD TO GOOGLE SHEETS
-try:
-    sheet.clear()
-    sheet.update([df.columns.tolist()] + df.values.tolist())
-    print("✅ SHEET UPDATED")
-except Exception as e:
-    print("UPLOAD ERROR:", e)
+# ================== UPLOAD ==================
+sheet.clear()
+sheet.update([portfolio.columns.tolist()] + portfolio.astype(str).values.tolist())
 
 
-# ✅ TELEGRAM ALERT
-msg = "📊 TOP STOCK PICKS\n\n"
 
-for _, r in top10.iterrows():
-    msg += f"{r['Stock']} | Score:{r['Score']} | Prob:{r['Buy Probability']}%\n"
+# ================== TELEGRAM ==================
+
+msg = "📊 PORTFOLIO ALLOCATION\n\n"
+
+for _, r in portfolio.iterrows():
+    msg += (
+        f"{r['Stock']} | ₹{round(r['Invested'],0)} "
+        f"| {round(r['Allocation %'],1)}%\n"
+    )
+
 
 send_telegram(msg)
 
