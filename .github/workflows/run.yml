@@ -1,9 +1,9 @@
 name: Run Stock Script
 
 on:
-  workflow_dispatch:   # ✅ Manual run only (SAFE)
+  workflow_dispatch:   # manual run
   schedule:
-    - cron: "0 13 * * *"   # 6:30 PM IST (keep for later)
+    - cron: "0 13 * * *"   # 6:30 PM IST
 
 jobs:
   run:
@@ -21,11 +21,11 @@ jobs:
       - name: Install libraries
         run: |
           pip install pandas yfinance gspread oauth2client requests scikit-learn
-                 
-    - name: Run script
-      env:
-        GOOGLE_CREDS: ${{ secrets.GOOGLE_CREDS }}
-        BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-        CHAT_ID: ${{ secrets.CHAT_ID }}
-     run: python test.py
-  
+
+      - name: Run script
+        env:
+          GOOGLE_CREDS: ${{ secrets.GOOGLE_CREDS }}
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+        run: python test.py
+``
